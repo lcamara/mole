@@ -35,8 +35,8 @@
 
 // 184.73.196.5 <=> mole.research.nokia.com
 
-#define MOLE_SERVER_URL    "http://mole.research.nokia.com:8080"
-#define MOLE_MAPSERVER_URL "https://s3.amazonaws.com/mole-nokia"
+#define MOLE_SERVER_URL    "http://200.141.73.238:8080"
+#define MOLE_MAPSERVER_URL "http://200.141.73.238"
 #define MOLE_MAPSERVER_URL_CHOP 12
 
 // CHOP => number of characters between slash and end + 1 (this should be done programmatically....)

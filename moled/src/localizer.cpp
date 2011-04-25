@@ -360,6 +360,21 @@ void Localizer::localize () {
   const double min_space_mac_overlap_coefficient = 0.01;
 
 
+  //Bayes
+  QList<QString> potential_bayes_areas;
+  QMapIterator<QString,AreaDesc*> it (*signal_maps);
+
+  while(it.hasNext()) {
+    it.next();
+    QSet<QString> *macs = it.value()->get_macs();
+    QMapIterator<QString,MacDesc*> itMac (*active_macs);
+
+    while(itMac.hasNext()) {
+      itMac.next();
+      if(macs->contains(itMac.key()) && !potential_bayes_areas.contains(it.key()))
+        potential_bayes_areas.push_back(it.key());
+    }
+  }
 
   QList<QString> potential_areas;
   QMapIterator<QString,AreaDesc*> i (*signal_maps);
@@ -406,10 +421,33 @@ void Localizer::localize () {
     return;
   }
 
+  //Bayes
+  if (potential_bayes_areas.size() == 0) {
+    qDebug() << "BAYES: eliminated all areas";
+    return;
+  }
+
   stats->set_potential_area_count (potential_areas.size());
 
   // next narrow down to a subset of spaces
   // from these areas
+
+  //Bayes
+  QMap<QString,SpaceDesc*> potential_bayes_spaces;
+  QListIterator<QString> b (potential_bayes_areas);
+
+  while(b.hasNext()) {
+    QString areaName = b.next();
+    AreaDesc *areaB = signal_maps->value(areaName);
+    QMap<QString,SpaceDesc*> *spacesB = areaB->get_spaces();
+    QMapIterator<QString, SpaceDesc*> sB (*spacesB);
+
+    while(sB.hasNext()) {
+      sB.next();
+      if (sB.value())
+        potential_bayes_spaces.insert(sB.key(), sB.value());
+    }
+  }
 
   QMap<QString,SpaceDesc*> potential_spaces;
   QListIterator<QString> j (potential_areas);
@@ -474,6 +512,8 @@ void Localizer::localize () {
 
   make_overlap_estimate (potential_spaces);
 
+  //FIXME: remove old code used by potential_bayes
+  make_bayes_estimate (potential_spaces);
 }
 
 
@@ -538,7 +578,242 @@ void Localizer::make_overlap_estimate
   stats->emit_statistics ();
 }
 
+QSet<QString> Localizer::findSignatureApMacs(const QMap<QString,SpaceDesc*> &potentialSpaces)
+{
+  QSet<QString> apUnion;
+  QSet<QString> *signatureMacsSet = 0;
 
+  QMapIterator<QString,SpaceDesc*> it (potentialSpaces);
+  while (it.hasNext()) {
+    it.next();
+    signatureMacsSet = it.value()->get_macs();
+
+    QSetIterator<QString> itMac (*signatureMacsSet);
+    while (itMac.hasNext()) {
+      QString mac = itMac.next();
+      if (!apUnion.contains(mac)) {
+        apUnion.insert(mac);
+        //qDebug() << "AP Union mac: " << mac;
+      }
+    }
+    //apUnion = apUnion.unite(*signatureMacsSet);
+  }
+  return apUnion;
+}
+
+QSet<QString> Localizer::findNovelApMacs(const QMap<QString, SpaceDesc*> &potentialSpaces)
+{
+  QSet<QString> signatureApSet = findSignatureApMacs(potentialSpaces);
+  QSet<QString> scanApSet = QSet<QString>::fromList(active_macs->keys());
+  QSet<QString> novelApMacSet;
+
+  // Take a set difference scan_ap_set \ sig_ap_set.
+  QSetIterator<QString> it (scanApSet);
+  while (it.hasNext()) {
+    QString mac = it.next();
+    //qDebug() << "Scan AP mac: " << mac;
+    if (!signatureApSet.contains(mac)) {
+      novelApMacSet.insert(mac);
+      //qDebug() << "MAC novo: " << mac;
+    }
+  }
+  //qDebug() << "Mac set size: " << novelApMacSet.size();
+  return novelApMacSet;
+}
+
+double Localizer::probabilityEstimate(int rssi, QString apMac, const Sig &signature)
+{
+  //FIXME: apMac is really necessary?
+  Q_UNUSED(apMac);
+
+  double mean = signature.mean;
+  double std = signature.stddev;
+
+  //qDebug() << "RSSI: " << rssi;
+  //qDebug() << "MEAN: " << mean;
+  //qDebug() << "STD: " << std;
+  //FIXME: Make a const to 0.5 value. What does it mean?
+  double upperLimit = rssi + 0.5;
+  double lowerLimit = rssi - 0.5;
+
+  //qDebug() << "UPPER LIMIT: " << upperLimit;
+  //qDebug() << "LOWER LIMIT: " << lowerLimit;
+  double upperProb = probabilityXLessValue(upperLimit, mean, std);
+  double lowerProb = probabilityXLessValue(lowerLimit, mean, std);
+
+  return (upperProb - lowerProb);
+}
+
+double Localizer::erfcc (double x) {
+    double z = qAbs(x);
+    double t = 1.0/ (1.0 + 0.5*z);
+
+    double r = t * exp(-z*z-1.26551223+t*(1.00002368+t*(.37409196+
+                 t*(.09678418+t*(-.18628806+t*(.27886807+
+                 t*(-1.13520398+t*(1.48851587+t*(-.82215223+
+                 t*.17087277)))))))));
+    if (x >= 0.) {
+        return r;
+    } else {
+        return 2. - r;
+    }
+}
+
+double Localizer::probabilityXLessValue(double value, double mean, double std)
+{
+  //FIXME: Make a const to 0.5 value.
+  if (value <= mean) {
+      double var = (mean - value) / std;
+      //qDebug() << "Valor menor ou igual: " << var << erfcc(var);
+      return (0.5 - (1. - erfcc(var)));
+  }
+  else {
+      double var = (value - mean) / std;
+      //qDebug() << "Valor maior: " << var << erfcc(var);
+      return (0.5 + (1. - erfcc(var)));
+  }
+}
+
+void Localizer::make_bayes_estimate(QMap<QString,SpaceDesc*> &potentialSpaces)
+{
+  qDebug() << "\n\nBAYES ESTIMATE";
+
+  //Novel AP MACs in testing_scans.
+  QSet<QString> novelApMacs = findNovelApMacs(potentialSpaces);
+  //qDebug() << "novelApMacs size: " << novelApMacs.size();
+
+  QString max_space;
+  double max_score = -1.0;
+
+  // Initialize beliefs.
+  QMap<QString, double> beliefs;
+
+  int spacesSize = potentialSpaces.size();
+  double initialUniformValue = 1.0/spacesSize;
+
+  QMapIterator<QString,SpaceDesc*> it (potentialSpaces);
+
+  while (it.hasNext()) {
+      it.next();
+      //qDebug() << "Beliefs key: " << it.key() << " value: " << initialUniformValue;
+      beliefs.insert(it.key(), initialUniformValue);
+  }
+  //qDebug() << "Beliefs size: " << beliefs.size();
+
+  // Update beliefs scan by scan.
+
+  // Because we're not working in log-domain, this might cause
+  // floating point underflow. However, it shouldn't be a matter
+  // because 1) it needs ~150 readings with 1% class-conditional
+  // probability without renormalization to reach underflow for double
+  // type; 2) the localizer is stateless across sessions -- having
+  // some zero probability doesn't matter as long as the normalizer is
+  // not 0.
+
+  QMapIterator<QString,MacDesc*> itMac (*active_macs);
+
+  //while (itMac.hasNext()) {
+  //    itMac.next();
+
+  //    QString apMac = itMac.key();
+  //    //qDebug() << "MAC lido:  " << apMac;
+  //}
+  //itMac.toFront();
+  while (itMac.hasNext()) {
+      itMac.next();
+
+      QString apMac = itMac.key();
+      //qDebug() << "MAC lido:  " << apMac;
+      // Skip this reading if ap is novel.
+      if ( novelApMacs.contains(apMac) )
+        continue;
+
+      QList<int> apRssiList = itMac.value()->rssiList();
+
+      QListIterator<int> itRssi (apRssiList);
+
+      while(itRssi.hasNext()) {
+          int rssi = itRssi.next();
+          //qDebug() << "Aqui";
+
+          qreal normalizer = 0.0;
+
+          QMapIterator<QString, double> itBeliefs (beliefs);
+
+          while(itBeliefs.hasNext()) {
+              itBeliefs.next();
+              QString apBeliefs = itBeliefs.key();
+              //qDebug() << "Beliefs " << apBeliefs << itBeliefs.value();
+
+              SpaceDesc *space = potentialSpaces.value(apBeliefs);
+              //if(space)
+              //  qDebug() << "Tem algo no space";
+              QMap<QString,Sig*> *sigs = space->get_sigs();
+              //QList<QString> keysSig = sigs->keys();
+              //QListIterator<QString> j (keysSig);
+              //while(j.hasNext())
+              //  qDebug() << "Key sig: " << j.next();
+              //qDebug() << "Ap Mac: " << apMac;
+              //if(sigs)
+              //  qDebug() << "Tem algo na sigs";
+              Sig *apSignature = sigs->value(apMac);
+              //Sig *apSignature = space->get_sigs()->value(apBeliefs);
+              if(apSignature) {
+                //qDebug() << "Tem algo no  apSignature";
+                double conditionalProbability = probabilityEstimate(rssi, apMac, *apSignature);
+                //qDebug() << "Conditional Probability" << conditionalProbability;
+                //qDebug() << "itBeliefs.value()" << itBeliefs.value();
+
+                double newProb = itBeliefs.value() * conditionalProbability;
+                //qDebug() << "newProb" << newProb;
+                //qDebug() << "apBeliefs" << apBeliefs;
+                beliefs.insert(apBeliefs, newProb);
+                //qDebug() << "Beliefs 2 space name: " << apBeliefs << " prob: " << newProb;
+                normalizer += newProb;
+              }
+          }
+
+          // Renormalization.
+          //Q_ASSERT(normalizer != 0);
+
+          //itBeliefs.toFront();
+
+          //while(itBeliefs.hasNext()) {
+          //    itBeliefs.next();
+
+          //    double newProb = itBeliefs.value() / normalizer;
+          //    qDebug() << "Renormalization " << itBeliefs.key() << newProb;
+          //    beliefs.insert(itBeliefs.key(), newProb);
+          //}
+      }
+
+  }
+
+  QMapIterator<QString, double> itBeliefs (beliefs);
+
+  while(itBeliefs.hasNext()) {
+      itBeliefs.next();
+      double prob =  itBeliefs.value();
+
+      if (prob > max_score) {
+         max_score = prob;
+         max_space = itBeliefs.key();
+      }
+  }
+
+  //EXPERIMENTS: Log the location estimate to a TXT file
+  QString logFileDir = QDir::homePath().append("/.mole/");
+  QString logFileName = logFileDir.append("log-bayes-location.txt");
+
+  QFile logFile(logFileName);
+  if (logFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
+    QTextStream ts(&logFile);
+    ts << QDateTime::currentDateTime().toTime_t() << "| " << max_space << max_score << "\n";
+    logFile.close();
+  } else {
+    qDebug() << "MOLED: Failed to open the log file when a bayes location estimate is done.";
+  }
+}
 
 // TODO add coverage estimate, as int? suggested space?
 void Localizer::emit_new_location_estimate 
@@ -570,6 +845,19 @@ void Localizer::emit_location_estimate () {
   QDBusMessage msg = QDBusMessage::createSignal("/", "com.nokia.moled", "LocationEstimate");
   msg << current_estimated_space_name;
   msg << online;
+
+  //EXPERIMENTS: Log the location estimate to a TXT file
+  QString logFileDir = QDir::homePath().append("/.mole/");
+  QString logFileName = logFileDir.append("log-wego-location.txt");
+
+  QFile logFile(logFileName);
+  if (logFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
+    QTextStream ts(&logFile);
+    ts << QDateTime::currentDateTime().toTime_t() << "| " << current_estimated_space_name << "\n";
+    logFile.close();
+  } else {
+    qDebug() << "MOLED: Failed to open the log file when a location estimate is done.";
+  }
 
   QDBusConnection::sessionBus().send(msg);
 }

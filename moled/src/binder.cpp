@@ -196,6 +196,18 @@ void Binder::handle_bind_request
   stream << serialized;
   file.close ();
 
+  //EXPERIMENTS: Log the bind to a TXT file
+  QString logFileDir = QDir::homePath().append("/.mole/");
+  QString logFileName = logFileDir.append("log-bind.txt");
+
+  QFile logFile(logFileName);
+  if (logFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
+    QTextStream ts(&logFile);
+    ts << QDateTime::currentDateTime().toTime_t() << "| " << space_name << "\n";
+    logFile.close();
+  } else {
+    qDebug() << "MOLED: Failed to open the log file when a bind is done.";
+  }
 
   // delete up to last minute
   clean_scan_list (60);

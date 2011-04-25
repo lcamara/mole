@@ -27,9 +27,10 @@
 class MacDesc : public Sig {
  public:
   MacDesc ();
-  
+
   void add_reading (int rssi);
   void drop_reading (int rssi);
+  QList<int> rssiList() const { return rssi_list; }
   int get_count();
 
  public:

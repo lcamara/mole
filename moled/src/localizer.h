@@ -33,6 +33,7 @@
 #include "../common/overlap.h"
 #include "scan.h"
 #include "binder.h"
+#include "bayes.h"
 
 
 class SpaceDesc {
@@ -266,6 +267,14 @@ private:
 
   void make_overlap_estimate 
     (QMap<QString,SpaceDesc*> &potential_spaces);
+
+  //Bayes
+  void make_bayes_estimate(QMap<QString,SpaceDesc*> &potential_spaces);
+  QSet<QString> findSignatureApMacs(const QMap<QString,SpaceDesc*> &potential_spaces);
+  QSet<QString> findNovelApMacs(const QMap<QString, SpaceDesc*> &potential_spaces);
+  double probabilityEstimate(int rssi, QString apMac, const Sig &signature);
+  double probabilityXLessValue(double value, double mean, double std);
+  double erfcc (double x);
 
   //void check_network_state ();
 
